@@ -1,0 +1,7 @@
+/logs
+/temp
+/vendor
+/www/.well-known
+
+/conf/do-tools.conf.php
+/data/do-tools-locations.json

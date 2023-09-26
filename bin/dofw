@@ -1,0 +1,593 @@
+<?php
+
+use Nether\Common;
+use Nether\Console;
+
+define('ProjectRoot', dirname(__FILE__, 2));
+require(sprintf('%s/vendor/autoload.php', ProjectRoot));
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+
+class FirewallTool
+extends Console\Client {
+
+	protected string
+	$ProjectRoot;
+
+	protected Common\Datastore
+	$Config;
+
+	protected DOTools\LocationStore
+	$Locations;
+
+	////////////////////////////////////////////////////////////////
+	////////////////////////////////////////////////////////////////
+
+	public function
+	__Construct(string $ProjectRoot) {
+		parent::__Construct();
+
+		$this->ProjectRoot = $ProjectRoot;
+
+		$this->Config = require(sprintf(
+			'%s/conf/do-tools.conf.php',
+			$this->ProjectRoot
+		));
+
+		$this->Locations = new DOTools\LocationStore(sprintf(
+			'%s/data',
+			$this->ProjectRoot
+		));
+
+		return;
+	}
+
+	////////////////////////////////////////////////////////////////
+	////////////////////////////////////////////////////////////////
+
+	#[Console\Meta\Command('list')]
+	#[Console\Meta\Info('List all the Firewalls.')]
+	#[Console\Meta\Arg('Config', 'The DigitalOcean API key name from config.php')]
+	#[Console\Meta\Error(1, 'no config found for %s')]
+	public function
+	FirewallList():
+	int {
+
+		$Conf = $this->GetInput(1);
+
+		if(!$Conf)
+		return $this->FirewallListConfs();
+
+		////////
+
+		if(!isset($this->Config[$Conf]))
+		$this->Quit(1, $Conf);
+
+		////////
+
+		$Client = $this->GetClient($Conf);
+		$List = $this->GetFirewallList($Client);
+		$Firewall = NULL;
+
+		$this
+		->PrintLn()
+		->PrintLn(sprintf(
+			'%s %s (%s)',
+			$this->Format('Firewalls:', Preset: static::FmtPrime),
+			$Conf,
+			count($List)
+		));
+
+		foreach($List as $Firewall) {
+			/** @var DigitalOceanV2\Entity\Firewall $Firewall */
+
+			$this->PrintLn(sprintf(
+				'%s %s (%s)',
+				$this->Format('*', Preset: static::FmtAccent),
+				$Firewall->name,
+				$Firewall->id
+			));
+		}
+
+		$this->PrintLn();
+		return 0;
+	}
+
+	public function
+	FirewallListConfs():
+	int {
+
+		$this
+		->PrintLn()
+		->FormatLn('Configs:', Preset: static::FmtPrime);
+
+		foreach($this->Config as $Conf => $Data) {
+			$this->PrintLn(sprintf(
+				'%s %s',
+				$this->Format('*', static::FmtAccent),
+				$Conf
+			));
+		}
+
+		$this->PrintLn();
+		return 0;
+	}
+
+	#[Console\Meta\Command('ssh-ungroup')]
+	#[Console\Meta\Info('Looks for SSH rules where IPs were grouped together and splits them into their own rules.')]
+	#[Console\Meta\Arg('Config', 'The DigitalOcean API key name from config.php')]
+	#[Console\Meta\Error(1, 'No Firewall found')]
+	public function
+	FirewallUngroupSSH():
+	int {
+
+		$Conf = $this->GetInput(1);
+		$Client = $this->GetClient($Conf);
+		$Firewall = $this->AskUserSelectFirewall($Client);
+
+		$Rules = NULL;
+		$Rule = NULL;
+		$Addr = NULL;
+		$Worked = FALSE;
+
+		////////
+
+		if(!$Firewall)
+		$this->Quit(1);
+
+		$this->PrintLn(sprintf(
+			'%s %s',
+			$this->Format('Firewall:', Preset: static::FmtPrime),
+			$Firewall->id
+		));
+
+		////////
+
+		$Rules = $this->FilterFirewallRulesSSH($Firewall->inboundRules);
+
+		foreach($Rules as $Rule) {
+			/** @var DigitalOceanV2\Entity\FirewallRuleInbound $Rule */
+
+			if(count($Rule->sources->addresses) === 1)
+			continue;
+
+			$Worked = TRUE;
+
+			foreach($Rule->sources->addresses as $Addr) {
+				$this->AddFirewallInboundSSH($Client, $Firewall->id, $Addr);
+
+				$this->PrintLn(sprintf(
+					'%s %s %s %s %s',
+					$this->Format('Ungrouping:', Preset: static::FmtPrime),
+					$this->Format('Port:', Preset: static::FmtAccent),
+					$Rule->ports,
+					$this->Format('Addr:', Preset: static::FmtAccent),
+					$Addr
+				));
+
+				$this->RemoveFirewallInboundRule(
+					$Client,
+					$Firewall->id,
+					$Rule->ToArray()
+				);
+			}
+		}
+
+		if(!$Worked)
+		$this->PrintLn('No SSH rules needed to be ungrouped.');
+
+		return 0;
+	}
+
+	#[Console\Meta\Command('ssh-update')]
+	#[Console\Meta\Info('Update the specified firewall with your current public IP.')]
+	#[Console\Meta\Arg('Config', 'The DigitalOcean API key name from config.php')]
+	#[Console\Meta\Arg('Location', 'Name of the location you want to update - meaning it will try to delete old rules.')]
+	#[Console\Meta\Value('--ip', 'Use the specified IP instead of looking up your current public one.')]
+	#[Console\Meta\Error(1, 'No Firewall found')]
+	#[Console\Meta\Error(2, 'No Location specified')]
+	#[Console\Meta\Error(3, 'Failed to determine Public IP address')]
+	public function
+	FirewallUpdateSSH():
+	int {
+
+		$Conf = $this->GetInput(1);
+		$Client = $this->GetClient($Conf);
+		$Location = $this->GetInput(2);
+		$LocationOldIP = $this->GetLocationOldIP($Location);
+
+		$IP = $this->GetOption('IP');
+		$Firewall = NULL;
+
+		// make sure a location was specified for looking up stale addr.
+
+		if(!$Location)
+		$this->Quit(2);
+
+		// ask to select what firewall to manage.
+
+		$Firewall = $this->AskUserSelectFirewall($Client);
+
+		if(!$Firewall)
+		$this->Quit(1);
+
+		$this->PrintLn(sprintf(
+			'%s %s',
+			$this->Format('Firewall:', Preset: static::FmtPrime),
+			$Firewall->id
+		));
+
+		// determine the current public ip address that should be added
+		// to the firewall.
+
+		if(!$IP)
+		$IP = $this->FetchCurrentPublicIP();
+
+		if(!$IP)
+		$this->Quit(3);
+
+		$this->PrintLn(sprintf(
+			'%s %s',
+			$this->Format('IP:', Preset: static::FmtAccent),
+			$IP
+		));
+
+		// announce what is going to happen regarding the stale ip address.
+
+		if($LocationOldIP)
+		$this->PrintLn(sprintf(
+			'%s %s',
+			$this->Format('Previous IP:', Preset: static::FmtAccent),
+			$LocationOldIP
+		));
+
+		else
+		$this->PrintLn(sprintf(
+			$this->Format(
+				'No previous IP for Location "%s" found. No stale entries will be pruned.',
+				Preset: static::FmtAccent
+			),
+			$Location
+		));
+
+		// do not prune the ip we are trying to add if our local location
+		// database hasn't changed.
+
+		if($LocationOldIP === $IP)
+		$LocationOldIP = NULL;
+
+		////////
+
+		$this->PrintLn();
+
+		if($this->PromptTrue('Update Firewall?', '[y/N]')) {
+			$this->AddFirewallInboundSSH($Client, $Firewall->id, $IP);
+
+			if($LocationOldIP)
+			$this->RemoveFirewallInboundSSH($Client, $Firewall->id, $LocationOldIP);
+		}
+
+		return 0;
+	}
+
+	#[Console\Meta\Command('loc-update')]
+	#[Console\Meta\Info('Update the local database with an IP address.')]
+	#[Console\Meta\Arg('Location', 'Name of the location you want to update - meaning it will try to delete old rules.')]
+	#[Console\Meta\Value('--ip', 'Use the specified IP instead of looking up your current public one.')]
+	#[Console\Meta\Error(1, 'No location specified')]
+	#[Console\Meta\Error(2, 'Failed to determine Public IP address')]
+	public function
+	LocationUpdate():
+	int {
+
+		$Location = Common\Datafilters::PathableKey(
+			$this->GetInput(1) ?? ''
+		);
+
+		$LocationOldIP = NULL;
+		$IP = $this->GetOption('IP');
+
+		if(!$Location)
+		$this->Quit(1);
+
+		////////
+
+		$LocationOldIP = $this->Locations[$Location];
+
+		if($LocationOldIP)
+		$this->PrintLn(sprintf(
+			'%s %s (%s)',
+			$this->Format('Location:', static::FmtPrime),
+			$Location,
+			$LocationOldIP
+		));
+
+		else
+		$this->PrintLn(sprintf(
+			'%s %s not in database yet.',
+			$this->Format('Location:', static::FmtPrime),
+			$Location
+		));
+
+		////////
+
+		if(!$IP)
+		$IP = $this->FetchCurrentPublicIP();
+
+		if(!$IP)
+		$this->Quit(2);
+
+		$this->PrintLn(sprintf(
+			'%s %s',
+			$this->Format('Update IP:', Preset: static::FmtPrime),
+			$IP
+		));
+
+		////////
+
+		if($LocationOldIP !== $IP) {
+			($this->Locations)
+			->Shove($Location, $IP)
+			->Write();
+		}
+
+		return 0;
+	}
+
+	////////////////////////////////////////////////////////////////
+	////////////////////////////////////////////////////////////////
+
+	public function
+	AddFirewallInboundSSH(DigitalOceanV2\Client $Client, string $UUID, string $IP):
+	static {
+
+		$Method = __METHOD__;
+		$FWAPI = $Client->Firewall();
+
+		$RuleSet = [
+			'inbound_rules' => [
+				[
+					'protocol' => 'tcp',
+					'ports'    => '22',
+					'sources'  => [
+						'addresses' => [ $IP ]
+					]
+				]
+			]
+		];
+
+		$this->PrintLn(sprintf(
+			'%s %s',
+			$this->Format("[{$Method}]", static::FmtPrime),
+			$IP
+		));
+
+		$FWAPI->AddRules($UUID, $RuleSet);
+
+		return $this;
+	}
+
+	public function
+	RemoveFirewallInboundSSH(DigitalOceanV2\Client $Client, string $UUID, string $IP):
+	static {
+
+		$Method = __METHOD__;
+		$FWAPI = $Client->Firewall();
+
+		$RuleSet = [
+			'inbound_rules' => [
+				[
+					'protocol' => 'tcp',
+					'ports'    => '22',
+					'sources'  => [
+						'addresses' => [ $IP ]
+					]
+				]
+			]
+		];
+
+		$this->PrintLn(sprintf(
+			'%s %s',
+			$this->Format("[{$Method}]", Preset: static::FmtAccent),
+			$IP
+		));
+
+		$FWAPI->RemoveRules($UUID, $RuleSet);
+
+		return $this;
+	}
+
+	public function
+	RemoveFirewallInboundRule(DigitalOceanV2\Client $Client, string $UUID, array $Rule):
+	static {
+
+		$Method = __METHOD__;
+		$FWAPI = $Client->Firewall();
+
+		$RuleSet = [
+			'inbound_rules' => [ $Rule ]
+		];
+
+		$this->PrintLn(sprintf(
+			'%s %s',
+			$this->Format("[{$Method}]", Preset: static::FmtPrime),
+			json_encode($Rule)
+		));
+
+		$FWAPI->RemoveRules($UUID, $RuleSet);
+
+		return $this;
+	}
+
+	public function
+	FilterFirewallRulesByPort(array $Rules, string $Port):
+	Common\Datastore {
+
+		$Data = new Common\Datastore($Rules);
+
+		$Data->Filter(
+			fn(DigitalOceanV2\Entity\FirewallRule $Rule)
+			=> $Rule->ports === '22'
+		);
+
+		return $Data;
+	}
+
+	public function
+	FilterFirewallRulesSSH(array $Rules):
+	Common\Datastore {
+
+		return $this->FilterFirewallRulesByPort($Rules, '22');
+	}
+
+	////////////////////////////////////////////////////////////////
+	////////////////////////////////////////////////////////////////
+
+	protected function
+	GetClient(?string $Conf):
+	DigitalOceanV2\Client {
+
+		if(!$Conf)
+		throw new Exception("No API Key name specified.");
+
+		if(!isset($this->Config[$Conf]))
+		throw new Exception("No API Key found for \"{$Conf}\" in config.php");
+
+		$Client = new DigitalOceanV2\Client;
+		$Client->Authenticate($this->Config[$Conf]);
+
+		return $Client;
+	}
+
+	protected function
+	GetFirewallList(DigitalOceanV2\Client $Client):
+	Common\Datastore {
+
+		$FWAPI = $Client->Firewall();
+		$List = $FWAPI->GetAll();
+		$Output = new Common\Datastore($List);
+
+		$Output
+		->Sort(
+			fn(DigitalOceanV2\Entity\Firewall $A, DigitalOceanV2\Entity\Firewall $B)
+			=> ($A->name <=> $B->name)
+		)
+		->Revalue();
+
+		return $Output;
+	}
+
+	protected function
+	AskUserSelectFirewall(DigitalOceanV2\Client $Client):
+	?DigitalOceanV2\Entity\Firewall {
+
+		$UUID = NULL;
+		$Firewalls = $this->GetFirewallList($Client);
+		$FIter = NULL;
+		$FWall = NULL;
+
+		////////
+
+		$this
+		->PrintLn()
+		->FormatLn('Select Firewall:', Preset: static::FmtPrime);
+
+		foreach($Firewalls as $FIter => $FWall) {
+			/** @var DigitalOceanV2\Entity\Firewall $FWall */
+
+			$this->PrintLn(sprintf(
+				'%s %s (%s)',
+				$this->Format(sprintf('%d.', ($FIter + 1)), static::FmtAccent),
+				$FWall->name,
+				$FWall->id
+			));
+		}
+
+		////////
+
+		$this->PrintLn();
+		$Prompt = trim($this->Prompt(NULL, '[#|UUID]?'));
+
+		if(Common\Datafilters::UUID($Prompt))
+		$UUID = $Prompt;
+		elseif(is_numeric($Prompt) && isset($Firewalls[$Prompt - 1]))
+		$UUID = $Firewalls[$Prompt - 1]->id;
+
+		if(!$UUID)
+		return NULL;
+
+		////////
+
+		$Firewalls->Filter(
+			fn(DigitalOceanV2\Entity\Firewall $FW)
+			=> $FW->id === $UUID
+		);
+
+		if(!$Firewalls->Count())
+		return NULL;
+
+		////////
+
+		$Firewalls->Revalue();
+
+		return $Firewalls[0];
+	}
+
+	////////////////////////////////////////////////////////////////
+	////////////////////////////////////////////////////////////////
+
+	protected function
+	FetchCurrentPublicIP():
+	string {
+
+		//$IP = $this->FetchCurrentPublicIP_TechLive();
+
+		//if(!$IP)
+		$IP = $this->FetchCurrentPublicIP_IPEchoNet();
+
+		return $IP;
+	}
+
+	protected function
+	FetchCurrentPublicIP_TechLive():
+	?string {
+
+		//$this->PrintLn('Asking Tech.live for IP');
+		$IP = trim(file_get_contents('https://tech.live/ip'));
+
+		if(!$IP)
+		return NULL;
+
+		return $IP;
+	}
+
+	protected function
+	FetchCurrentPublicIP_IPEchoNet():
+	?string {
+
+		//$this->PrintLn('Asking IPEcho.net for IP');
+		$IP = trim(file_get_contents('https://ipecho.net/plain'));
+
+		if(!$IP)
+		return NULL;
+
+		return $IP;
+	}
+
+	protected function
+	GetLocationOldIP(string $Loc):
+	?string {
+
+		if(!isset($this->Locations[$Loc]))
+		return NULL;
+
+		return $this->Locations[$Loc];
+	}
+
+}
+
+////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////
+
+exit((new FirewallTool(ProjectRoot))->Run());

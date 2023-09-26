@@ -1,0 +1,31 @@
+{
+	"minimum-stability": "dev",
+	"prefer-stable": true,
+	"config": {
+		"preferred-install": {
+			"netherphp/*": "source",
+			"*": "dist"
+		},
+		"allow-plugins": {
+			"dealerdirect/phpcodesniffer-composer-installer": true,
+			"netherphp/composer-plugin": true,
+			"php-http/discovery": true
+		}
+	},
+	"require": {
+		"netherphp/console": "dev-redux",
+		"netherphp/standards": "^0.2.9",
+		"toin0u/digitalocean-v2": "^4.6",
+		"symfony/http-client": "^6.2",
+		"nyholm/psr7": "^1.5",
+		"dealerdirect/phpcodesniffer-composer-installer": "^1.0"
+	},
+	"autoload": {
+		"psr-0": {
+			"DOTools\\": "core"
+		}
+	},
+	"bin": [
+		"bin/dofw"
+	]
+}

@@ -1,0 +1,6 @@
+@ECHO OFF
+
+SET SFILE=dofw
+SET SROOT=%~dp0
+
+CALL php %SROOT%%SFILE% %*

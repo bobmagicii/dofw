@@ -1,0 +1,12 @@
+<?php
+
+$Config = new Nether\Common\Datastore;
+
+// $Config->Define('name', 'api-key');
+
+// ($Config)
+// ->Define('name', 'api-key')
+// ->Define('name', 'api-key')
+// ->Define('name', 'api-key');
+
+return $Config;
